@@ -58,17 +58,16 @@ center_covariates <- if (!is.null(params$center_covariates)) params$center_covar
 
 tree <- ape::read.tree(tree_path)
 data <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
-# Normalise tip labels — strip '[...]' bracket annotations (ape's
-# comment-handling inside quoted labels is version-dependent) and
-# collapse spaces to underscores (ape converts unquoted _ to space).
-# See phyloglm_uni.R for the full rationale.
-strip_annotations <- function(s) {
-  s <- gsub("\\s*\\[[^]]*\\]\\s*", "", s)
+# Normalise tip labels — collapse spaces to underscores so ape's
+# unquoted-underscore-to-space conversion on read doesn't break the
+# intersect. Bracket '[...]' annotations are left alone because in this
+# dataset they are meaningful species identifiers (see phyloglm_uni.R).
+normalise_tips <- function(s) {
   s <- trimws(s)
   gsub(" ", "_", s, fixed = TRUE)
 }
-tree$tip.label <- strip_annotations(tree$tip.label)
-data[[tip_column]] <- strip_annotations(data[[tip_column]])
+tree$tip.label <- normalise_tips(tree$tip.label)
+data[[tip_column]] <- normalise_tips(data[[tip_column]])
 rownames(data) <- data[[tip_column]]
 
 kept <- intersect(tree$tip.label, data[[tip_column]])
