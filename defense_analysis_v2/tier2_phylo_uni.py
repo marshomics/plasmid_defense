@@ -58,6 +58,27 @@ def _run_one_direction(phylo_data: pd.DataFrame,
         )
         return pd.DataFrame()
 
+    # One-time sanity log of what we're handing to R. Helps diagnose
+    # "Too few matched tips (0)" — if the tip column is absent or empty
+    # here, R was never going to find anything to intersect against the
+    # tree. Logged at debug level after the first call; see r_bridge for
+    # the full stderr dump on R-side failures.
+    tip_col = "tip"
+    if tip_col in phylo_data.columns and not getattr(_run_one_direction,
+                                                     "_tip_sample_logged", False):
+        sample = phylo_data[tip_col].head(3).tolist()
+        logger.info(
+            f"phyloglm input sample — rows={len(phylo_data)}, "
+            f"has '{tip_col}' column: True, "
+            f"first 3 tip values: {sample}"
+        )
+        _run_one_direction._tip_sample_logged = True
+    elif tip_col not in phylo_data.columns:
+        logger.error(
+            f"phyloglm input is missing the '{tip_col}' column. "
+            f"Columns present: {list(phylo_data.columns)[:15]}..."
+        )
+
     r = call_r_script(
         "phyloglm_uni.R",
         tree_path=tree_path,
