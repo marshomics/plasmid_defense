@@ -86,25 +86,24 @@ cat(file = stderr(),
             else "<MISSING COLUMN>")
 )
 
-# Normalise tip labels so the intersect is robust to two Newick quirks:
-#  (1) ape::read.tree() converts unquoted underscores to spaces; the
-#      data TSV preserves whatever Python wrote.
-#  (2) Some GTDB trees carry '[species NNN]'-style comments inside tip
-#      labels. ape inconsistently preserves bracketed substrings inside
-#      quoted labels depending on version; strip them on both sides so
-#      we don't silently drop the bracketed half on one side only.
-strip_annotations <- function(s) {
-  # Remove '[...]' spans plus any surrounding whitespace, trim any
-  # residual leading/trailing whitespace (covers the case where ape has
-  # already stripped the bracket as a Newick comment, leaving a trailing
-  # space), and collapse remaining interior whitespace to '_'.
-  s <- gsub("\\s*\\[[^]]*\\]\\s*", "", s)
+# Normalise tip labels so the intersect is robust to ape's standard
+# unquoted-underscore-to-space conversion on read. Force both sides to
+# underscore form; this works regardless of whether dendropy wrote the
+# label quoted (spaces preserved) or unquoted (underscores get converted
+# to spaces by ape and then back to underscores by this gsub).
+#
+# IMPORTANT: do NOT strip '[species NNN]'-style bracket annotations here.
+# In this dataset those brackets are meaningful identifiers that
+# distinguish otherwise-identical species names (e.g. 's__foo [species
+# 1]' vs 's__foo [species 2]'); stripping them would collapse distinct
+# species to the same row key.
+normalise_tips <- function(s) {
   s <- trimws(s)
   gsub(" ", "_", s, fixed = TRUE)
 }
-tree$tip.label <- strip_annotations(tree$tip.label)
+tree$tip.label <- normalise_tips(tree$tip.label)
 if (tip_column %in% colnames(data)) {
-  data[[tip_column]] <- strip_annotations(data[[tip_column]])
+  data[[tip_column]] <- normalise_tips(data[[tip_column]])
 }
 
 cat(file = stderr(),
@@ -116,6 +115,16 @@ cat(file = stderr(),
             else "<MISSING COLUMN>")
 )
 
+# Duplicate-safety: if the data has multiple rows mapping to the same
+# tip label (shouldn't happen after upstream species aggregation, but
+# guard against it), keep the first and warn rather than erroring.
+dup_tip_count <- sum(duplicated(data[[tip_column]]))
+if (dup_tip_count > 0) {
+  cat(file = stderr(),
+      sprintf("[phyloglm_uni.R] WARNING: %d duplicate tip values in data; keeping first row per tip.\n",
+              dup_tip_count))
+  data <- data[!duplicated(data[[tip_column]]), , drop = FALSE]
+}
 rownames(data) <- data[[tip_column]]
 kept <- intersect(tree$tip.label, data[[tip_column]])
 cat(file = stderr(),
