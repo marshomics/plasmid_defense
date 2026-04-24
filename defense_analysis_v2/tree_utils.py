@@ -206,6 +206,11 @@ def build_phylo_dataframe(binary_df: pd.DataFrame, defense_cols: List[str],
     """
     sub = binary_df[binary_df["gtdb_species"].isin(species_to_tip)].copy()
     sub["tip"] = sub["gtdb_species"].map(species_to_tip)
+    # Underscore-normalise so the tip column matches what ape produces when
+    # it reads the Newick file (unquoted underscores get space-converted
+    # on read, and the R scripts reverse that — keeping the TSV in
+    # underscore form from the start avoids a round-trip mismatch).
+    sub["tip"] = sub["tip"].astype(str).str.replace(" ", "_", regex=False)
     non_defense = [c for c in sub.columns if c not in defense_cols]
     # Put tip first, then the other metadata / outcome / covariate columns,
     # then the defense columns.
