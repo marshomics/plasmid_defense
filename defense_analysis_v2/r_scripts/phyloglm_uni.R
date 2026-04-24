@@ -99,6 +99,13 @@ cat(file = stderr(),
 # species to the same row key.
 normalise_tips <- function(s) {
   s <- trimws(s)
+  # Strip literal outer single quotes. Newick quote delimiters SHOULD be
+  # stripped by ape::read.tree(), but some dendropy-write + ape-read
+  # combinations leave them in the label string (seen on GTDB species-
+  # level trees with bracketed annotations). Remove any leading/trailing
+  # single quotes here so the intersect with the data TSV works either way.
+  s <- gsub("^'+|'+$", "", s)
+  s <- trimws(s)
   gsub(" ", "_", s, fixed = TRUE)
 }
 tree$tip.label <- normalise_tips(tree$tip.label)
