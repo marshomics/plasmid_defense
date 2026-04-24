@@ -146,19 +146,21 @@ def firth_logistic_regression(X: np.ndarray, y: np.ndarray,
     except np.linalg.LinAlgError:
         cov = np.linalg.pinv(I)
     # Ill-conditioned information matrices (rare predictors, near-separation
-    # the Jeffreys penalty couldn't fully rescue) can produce negative
-    # diagonal entries when inversion falls through to pinv. Clip those to
-    # NaN rather than letting np.sqrt emit a RuntimeWarning for every fit;
-    # the NaN propagates cleanly through z / p so the downstream FDR
-    # correction and the "converged" flag surface the failure explicitly.
+    # the Jeffreys penalty couldn't fully rescue) can produce negative OR
+    # zero diagonal entries when inversion falls through to pinv. Both cases
+    # mean the Wald standard error is not well-defined for that coefficient;
+    # NaN them explicitly so the downstream z/p go to NaN rather than to
+    # ±inf or an artefactual p ≈ 0 (which FDR would then flag as highly
+    # significant). The "converged" flag already captures whether the
+    # outer IRLS reached tolerance; NaN SE is a separate, covariate-level
+    # failure mode and is surfaced via NaN in the returned p-values.
     diag = np.diag(cov).copy()
-    diag[~(np.isfinite(diag) & (diag >= 0))] = np.nan
-    with np.errstate(invalid="ignore"):
+    diag[~(np.isfinite(diag) & (diag > 0))] = np.nan
+    with np.errstate(invalid="ignore", divide="ignore"):
         se = np.sqrt(diag)
         z = beta / se
-    # Two-sided z-test (Wald); profile-likelihood intervals would be tighter
-    # but are a larger change to plumb through.
-    with np.errstate(invalid="ignore"):
+        # Two-sided Wald z-test; profile-likelihood intervals would be
+        # tighter but plumbing them through is a larger change.
         p_vals = 2 * stats.norm.sf(np.abs(z))
 
     return {
