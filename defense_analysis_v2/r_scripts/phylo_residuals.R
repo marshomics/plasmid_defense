@@ -41,6 +41,9 @@ tip_column <- if (!is.null(params$tip_column)) params$tip_column else "tip"
 
 tree <- ape::read.tree(tree_path)
 data <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
+# Normalise tip labels — see phyloglm_uni.R comment.
+tree$tip.label <- gsub(" ", "_", tree$tip.label, fixed = TRUE)
+data[[tip_column]] <- gsub(" ", "_", data[[tip_column]], fixed = TRUE)
 rownames(data) <- data[[tip_column]]
 kept <- intersect(tree$tip.label, data[[tip_column]])
 tree <- ape::drop.tip(tree, setdiff(tree$tip.label, kept))
