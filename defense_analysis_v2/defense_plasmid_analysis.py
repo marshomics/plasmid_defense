@@ -184,7 +184,8 @@ def run_pipeline(input_path: str, cfg: config.Config,
     workdir = Path(tempfile.mkdtemp(prefix=f"defense_v2_{granularity_label}_"))
     try:
         import dendropy
-        tree = dendropy.Tree.get(path=cfg.tree_file, schema="newick",
+        safe_tree_path = tree_utils.dedupe_newick_file(cfg.tree_file, logger)
+        tree = dendropy.Tree.get(path=str(safe_tree_path), schema="newick",
                                  preserve_underscores=True)
         tip_labels = [tip.label for tip in tree.taxon_namespace]
         matched_species, matched_tips, sp2tip = tree_utils.match_species_to_tree(
