@@ -31,14 +31,14 @@ n_perm     <- if (!is.null(params$n_perm)) params$n_perm else 1000
 
 tree <- ape::read.tree(tree_path)
 data <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
-# Normalise tip labels — see phyloglm_uni.R for rationale.
-strip_annotations <- function(s) {
-  s <- gsub("\\s*\\[[^]]*\\]\\s*", "", s)
+# Normalise tip labels — collapse spaces to underscores. Brackets in
+# labels are meaningful species identifiers here; do NOT strip them.
+normalise_tips <- function(s) {
   s <- trimws(s)
   gsub(" ", "_", s, fixed = TRUE)
 }
-tree$tip.label <- strip_annotations(tree$tip.label)
-data[[tip_column]] <- strip_annotations(data[[tip_column]])
+tree$tip.label <- normalise_tips(tree$tip.label)
+data[[tip_column]] <- normalise_tips(data[[tip_column]])
 data <- data[data[[tip_column]] %in% tree$tip.label, , drop = FALSE]
 tree <- ape::drop.tip(tree, setdiff(tree$tip.label, data[[tip_column]]))
 
