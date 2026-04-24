@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "defense_analysis_v2: phylogenetically-corrected analysis of bacterial anti-phage defense vs. plasmid carriage"
+version: 2.1.0
+date-released: 2026-04-24
+license: MIT
+repository-code: "https://github.com/YOUR_ORG/defense_analysis_v2"
+authors:
+  - family-names: "Marsh"
+    given-names: "James"
+abstract: >-
+  A tiered, phylogenetically-corrected pipeline for testing associations
+  between bacterial anti-phage defense systems and plasmid carriage across
+  large microbial-assembly catalogues. Handles species-level plasmid
+  propagation, strain-level defense redundancy, genome-capacity confounding,
+  and plasmid-detection false negatives, with sensitivity analyses under
+  alternative evolutionary models and feature constructions.
+keywords:
+  - phylogenetics
+  - comparative-genomics
+  - anti-phage-defense
+  - plasmids
+  - phyloglm
+  - PGLMM
