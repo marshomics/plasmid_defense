@@ -96,10 +96,30 @@ def dedupe_newick_file(tree_path: str, logger: logging.Logger,
         )
     tree = tree_list[0]
 
+    # Normalise leaf labels. Under ``suppress_leaf_node_taxa=True`` (which
+    # we need so duplicates don't collide in a shared TaxonNamespace),
+    # dendropy preserves the raw token exactly — including any surrounding
+    # single quotes from the original Newick. Writing them back out would
+    # then re-quote the already-quoted string, and ape would read a label
+    # that still contains literal quote characters. Strip a single outer
+    # pair here so the downstream intersect isn't sabotaged by stray
+    # quote chars.
+    leaves = [n for n in tree.leaf_node_iter()]
+    n_unquoted = 0
+    for leaf in leaves:
+        lab = leaf.label
+        if lab and len(lab) >= 2 and lab[0] == "'" and lab[-1] == "'":
+            leaf.label = lab[1:-1]
+            n_unquoted += 1
+    if n_unquoted:
+        logger.info(
+            f"Stripped literal outer quotes from {n_unquoted} leaf labels "
+            "(artefact of suppress_leaf_node_taxa parsing)."
+        )
+
     # Collect leaf labels, detect duplicates, rename in-place.
     from collections import Counter as _Counter
     seen: _Counter = _Counter()
-    leaves = [n for n in tree.leaf_node_iter()]
     for leaf in leaves:
         seen[leaf.label] += 1
     total_leaves = len(leaves)
