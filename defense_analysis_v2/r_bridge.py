@@ -88,9 +88,13 @@ def call_r_script(script_name: str, *, tree_path: str, data: pd.DataFrame,
     stderr = proc.stderr or ""
 
     if proc.returncode != 0 or not out_tsv.exists():
+        # Show enough stderr that embedded diagnostics (e.g. from
+        # phyloglm_uni.R's "Too few matched tips" branch, which dumps
+        # column names and sample values) aren't truncated.
+        truncated = stderr[:2000] + ("…" if len(stderr) > 2000 else "")
         logger.warning(
-            f"R script {script_name} failed (rc={proc.returncode}). "
-            f"stderr[:500]: {stderr[:500]}"
+            f"R script {script_name} failed (rc={proc.returncode}).\n"
+            f"stderr:\n{truncated}"
         )
         return RCallResult(None, stdout, stderr, proc.returncode,
                            error=stderr.strip().splitlines()[-1] if stderr.strip() else None)
