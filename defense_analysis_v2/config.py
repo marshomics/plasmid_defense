@@ -27,7 +27,8 @@ class Config:
     )
     tree_file: str = (
         "/ebio/abt3_scratch/jmarsh/tract_score3/gtdb_custom_trees/"
-        "human_animal_free_90percent/output/gtdbtk.rooted.speciesnames.tree"
+        "human_animal_free_90percent_species_level/output/"
+        "gtdbtk.rooted.speciesnames.tree"
     )
 
     # Plasmid metadata (per-plasmid rows). Joined to species via gtdb_species.
