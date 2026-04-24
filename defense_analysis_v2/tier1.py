@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import warnings
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -114,13 +115,23 @@ def _weighted_glm_logreg(binary: np.ndarray, plasmid: np.ndarray,
                          weights: np.ndarray, X_cov: np.ndarray) -> dict:
     """Standard weighted logistic (GLM binomial with freq_weights), with
     covariates — kept as diagnostic alongside Firth.
+
+    statsmodels' binomial link emits RuntimeWarning('overflow encountered
+    in exp') for extreme linear predictors during IRLS. The library clips
+    internally so the fit still converges; the warning is cosmetic but
+    floods the log in multi-thousand-system sweeps. We mute it here with
+    a localised filter rather than globally.
     """
     try:
         ones = np.ones_like(binary, dtype=float)
         X = np.column_stack([ones, binary.astype(float), X_cov])
         model = sm.GLM(plasmid, X, family=sm.families.Binomial(),
                        freq_weights=weights.astype(float))
-        res = model.fit(disp=0, maxiter=1000)
+        with warnings.catch_warnings(), np.errstate(over="ignore",
+                                                     invalid="ignore",
+                                                     divide="ignore"):
+            warnings.filterwarnings("ignore", category=RuntimeWarning)
+            res = model.fit(disp=0, maxiter=1000)
         return {
             "coefficient": float(res.params[1]),
             "std_err": float(res.bse[1]),
