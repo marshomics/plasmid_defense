@@ -65,6 +65,13 @@ phyloglm_method <- switch(evol_model,
 
 tree <- ape::read.tree(tree_path)
 data <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
+# ape::read.tree() converts unquoted underscores in Newick labels to
+# spaces; the data TSV preserves whatever the upstream Python code wrote.
+# Force both sides to underscore form so intersect() works regardless of
+# how the tree file was serialised (dendropy unquoted_underscores=True,
+# ape's own write.tree, ETE, manual, etc.).
+tree$tip.label <- gsub(" ", "_", tree$tip.label, fixed = TRUE)
+data[[tip_column]] <- gsub(" ", "_", data[[tip_column]], fixed = TRUE)
 rownames(data) <- data[[tip_column]]
 kept <- intersect(tree$tip.label, data[[tip_column]])
 if (length(kept) < 10) stop("Too few matched tips (", length(kept), ")")
