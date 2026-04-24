@@ -107,11 +107,22 @@ def call_r_script(script_name: str, *, tree_path: str, data: pd.DataFrame,
 def ensure_r_packages(r_executable: str, packages: list, logger: logging.Logger) -> None:
     """Check that the listed R packages are installed. Logs a warning if any
     is missing; downstream R scripts will error out with a specific message.
+
+    Rscript forwards every argument after ``-e <script>`` to
+    ``commandArgs(trailingOnly=TRUE)`` verbatim, including the legacy
+    ``--args`` separator that is only meaningful to ``R CMD BATCH`` /
+    ``R -e``. Passing it here would make the check_script report
+    ``--args`` as a missing package. So we skip the separator entirely
+    and instead hand the package list in as a quoted R vector inside
+    the script itself.
     """
-    check_script = "cat(setdiff(commandArgs(TRUE), rownames(installed.packages())), sep='\\n')"
+    pkg_vector = ", ".join(f'"{p}"' for p in packages)
+    check_script = (
+        f"cat(setdiff(c({pkg_vector}), rownames(installed.packages())), sep='\\n')"
+    )
     try:
         proc = subprocess.run(
-            [r_executable, "-e", check_script, "--args"] + packages,
+            [r_executable, "-e", check_script],
             capture_output=True, text=True, timeout=60,
         )
         missing = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
