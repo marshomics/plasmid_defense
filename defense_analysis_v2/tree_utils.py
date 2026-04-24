@@ -62,13 +62,56 @@ def dedupe_newick_file(tree_path: str, logger: logging.Logger,
     effectively excluded from phylogenetic analyses. A warning is logged
     listing every collision so the user can decide whether to regenerate
     the tree.
+
+    Some Newick files contain multiple trees in the same file (rooted +
+    unrooted, bootstrap replicates, etc.), delimited by ';'. Downstream
+    phylogenetic models only use one tree, and scanning the whole file
+    would treat every tip as a duplicate of itself once per extra tree.
+    We truncate to the first ';' and log a warning in that case.
     """
     src = Path(tree_path).read_text()
+
+    # Single-tree guard: Newick trees end with ';'. Multiple ';' means
+    # multiple trees — keep only the first. Track whether we truncated so
+    # we know to force a rewrite even if there are no duplicate labels.
+    stripped = src.rstrip()
+    trailing_semi = stripped.endswith(";")
+    n_trees = stripped.count(";")
+    truncated_to_first_tree = False
+    if n_trees > 1:
+        first_end = src.find(";")
+        logger.warning(
+            f"Tree file '{tree_path}' contains {n_trees} trees "
+            f"(';' delimiters); analysing only the first tree. "
+            f"Downstream phylogenetic models take a single tree."
+        )
+        src = src[: first_end + 1]
+        truncated_to_first_tree = True
+    elif n_trees == 0 and not trailing_semi:
+        logger.warning(
+            f"Tree file '{tree_path}' has no ';' terminator — "
+            "proceeding but output may be malformed."
+        )
+
     labels = _extract_tip_labels(src)
     counts = Counter(labels)
     dups = {lab: n for lab, n in counts.items() if n > 1}
-    if not dups:
+    logger.info(
+        f"Tree file scan: {len(labels)} tip-label occurrences, "
+        f"{len(counts)} unique, {len(dups)} duplicated."
+    )
+    if not dups and not truncated_to_first_tree:
+        # Nothing to change; return original path so callers don't pay
+        # for an unnecessary rewrite.
         return Path(tree_path)
+    if not dups and truncated_to_first_tree:
+        # Must still write the truncated single-tree version so
+        # downstream loaders don't re-parse the whole multi-tree file.
+        out_path = out_path or Path(tempfile.mkstemp(
+            prefix="defense_v2_single_tree_", suffix=".nwk")[1])
+        out_path.write_text(src)
+        logger.info(f"Wrote single-tree version to {out_path}")
+        return out_path
 
     logger.warning(
         f"Tree has {len(dups)} duplicate tip label(s); renaming extras "
@@ -190,6 +233,30 @@ def preprocess_newick_to_file(tree_path: str, kept_tips: List[str],
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tree.write(path=str(out_path), schema="newick", unquoted_underscores=True)
+
+    # ape::read.tree() applies a standard Newick convention of converting
+    # unquoted underscores to spaces. That breaks the `tip` column <->
+    # tree$tip.label intersect in every downstream R script unless the
+    # scripts themselves re-normalise. Belt-and-braces: force-quote every
+    # tip label in the written Newick so ape reads them verbatim and the
+    # pipeline works even when the R scripts aren't in sync with this
+    # module. A label already quoted is left alone.
+    try:
+        content = out_path.read_text()
+        wrapped = _TIP_LABEL_RE.sub(
+            lambda m: m.group(1) if m.group(1).startswith("'")
+                    else f"'{m.group(1)}'",
+            content,
+        )
+        if wrapped != content:
+            out_path.write_text(wrapped)
+    except Exception as e:
+        logger.warning(
+            f"Could not post-quote tip labels in {out_path}: {e}. "
+            "If ape reports 'Too few matched tips', re-sync the R scripts "
+            "under r_scripts/ which apply a space/underscore gsub fallback."
+        )
+
     return out_path
 
 
@@ -206,11 +273,12 @@ def build_phylo_dataframe(binary_df: pd.DataFrame, defense_cols: List[str],
     """
     sub = binary_df[binary_df["gtdb_species"].isin(species_to_tip)].copy()
     sub["tip"] = sub["gtdb_species"].map(species_to_tip)
-    # Underscore-normalise so the tip column matches what ape produces when
-    # it reads the Newick file (unquoted underscores get space-converted
-    # on read, and the R scripts reverse that — keeping the TSV in
-    # underscore form from the start avoids a round-trip mismatch).
-    sub["tip"] = sub["tip"].astype(str).str.replace(" ", "_", regex=False)
+    # Tip labels in the pruned Newick are force-quoted by
+    # preprocess_newick_to_file, so ape reads them verbatim with whatever
+    # spaces / underscores / case the original tree used. The `tip` column
+    # in the data TSV must match the ORIGINAL label form (i.e. whatever is
+    # in species_to_tip), not a normalised version — else intersect() will
+    # miss. No substitution here on purpose.
     non_defense = [c for c in sub.columns if c not in defense_cols]
     # Put tip first, then the other metadata / outcome / covariate columns,
     # then the defense columns.
