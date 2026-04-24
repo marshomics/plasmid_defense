@@ -28,9 +28,15 @@ seed        <- if (!is.null(params$seed)) params$seed else 42
 
 tree <- ape::read.tree(tree_path)
 data <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
-# Normalise tip labels — see phyloglm_uni.R comment.
-tree$tip.label <- gsub(" ", "_", tree$tip.label, fixed = TRUE)
-data[[tip_column]] <- gsub(" ", "_", data[[tip_column]], fixed = TRUE)
+# Normalise tip labels — see phyloglm_uni.R for rationale. Strip
+# '[...]' annotations, then collapse spaces to underscores.
+strip_annotations <- function(s) {
+  s <- gsub("\\s*\\[[^]]*\\]\\s*", "", s)
+  s <- trimws(s)
+  gsub(" ", "_", s, fixed = TRUE)
+}
+tree$tip.label <- strip_annotations(tree$tip.label)
+data[[tip_column]] <- strip_annotations(data[[tip_column]])
 rownames(data) <- data[[tip_column]]
 kept <- intersect(tree$tip.label, data[[tip_column]])
 tree <- ape::drop.tip(tree, setdiff(tree$tip.label, kept))
