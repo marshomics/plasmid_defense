@@ -11,6 +11,9 @@ a well-conditioned tree.
 """
 
 import logging
+import re
+import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -22,6 +25,84 @@ try:
     DENDROPY_AVAILABLE = True
 except ImportError:
     DENDROPY_AVAILABLE = False
+
+
+# Matches a Newick tip token: a (possibly quoted, possibly underscore-
+# containing) label that appears immediately before a comma, closing
+# parenthesis, colon (branch length), or semicolon. Internal node labels
+# come right after a closing parenthesis, so we exclude those by requiring
+# the character immediately before the label to be either '(' or ','.
+_TIP_LABEL_RE = re.compile(
+    r"(?<=[(,])"                          # preceded by ( or ,
+    r"('(?:[^']|'')+'|[^,():;\s][^,():;]*?)"  # quoted OR unquoted label
+    r"(?=[:,);])"                         # followed by : , ) ;
+)
+
+
+def _extract_tip_labels(newick: str) -> List[str]:
+    """Pull tip labels out of a raw Newick string without a full parser.
+    Used solely to detect / dedupe duplicates before handing the string to
+    dendropy, which rejects duplicates under its default TaxonNamespace.
+    """
+    return [m.group(1) for m in _TIP_LABEL_RE.finditer(newick)]
+
+
+def dedupe_newick_file(tree_path: str, logger: logging.Logger,
+                       out_path: Optional[Path] = None) -> Path:
+    """Return a path to a Newick file with unique tip labels.
+
+    GTDB species labels can collide when the same SpeciesCluster is
+    represented by multiple MAGs (e.g. 's__UBA12225 sp002347925' appearing
+    on two tips). dendropy's default loader raises on duplicates. We rename
+    the 2nd, 3rd, ... occurrences of each duplicate to
+    '<label>__dup<N>' and write a sanitized Newick file.
+
+    Downstream species-name matching (``match_species_to_tree``) only sees
+    the original labels for the first occurrence, so the duplicates are
+    effectively excluded from phylogenetic analyses. A warning is logged
+    listing every collision so the user can decide whether to regenerate
+    the tree.
+    """
+    src = Path(tree_path).read_text()
+    labels = _extract_tip_labels(src)
+    counts = Counter(labels)
+    dups = {lab: n for lab, n in counts.items() if n > 1}
+    if not dups:
+        return Path(tree_path)
+
+    logger.warning(
+        f"Tree has {len(dups)} duplicate tip label(s); renaming extras "
+        f"with '__dupN' suffix so dendropy can load the tree. Example: "
+        f"{next(iter(dups))} x{dups[next(iter(dups))]}"
+    )
+
+    # Walk the string left-to-right, assigning suffixes the second time we
+    # see a given label.
+    seen: Counter = Counter()
+    out_parts: List[str] = []
+    pos = 0
+    for m in _TIP_LABEL_RE.finditer(src):
+        lab = m.group(1)
+        start, end = m.span(1)
+        out_parts.append(src[pos:start])
+        seen[lab] += 1
+        if seen[lab] == 1 or counts[lab] == 1:
+            out_parts.append(lab)
+        else:
+            # Preserve quoting if the original was quoted
+            if lab.startswith("'") and lab.endswith("'"):
+                inner = lab[1:-1]
+                out_parts.append(f"'{inner}__dup{seen[lab] - 1}'")
+            else:
+                out_parts.append(f"{lab}__dup{seen[lab] - 1}")
+        pos = end
+    out_parts.append(src[pos:])
+
+    out_path = out_path or Path(tempfile.mkstemp(
+        prefix="defense_v2_dedup_tree_", suffix=".nwk")[1])
+    out_path.write_text("".join(out_parts))
+    logger.info(f"Wrote deduplicated tree to {out_path}")
+    return out_path
 
 
 def normalize_species_name(name: str) -> str:
@@ -83,7 +164,8 @@ def preprocess_newick_to_file(tree_path: str, kept_tips: List[str],
     if not DENDROPY_AVAILABLE:
         raise RuntimeError("dendropy is required for tree preprocessing")
 
-    tree = Tree.get(path=tree_path, schema="newick", preserve_underscores=True)
+    safe_path = dedupe_newick_file(tree_path, logger)
+    tree = Tree.get(path=str(safe_path), schema="newick", preserve_underscores=True)
 
     # Retain only the tips we want, renaming via the tip-label matching already
     # done by the caller.
