@@ -58,6 +58,10 @@ center_covariates <- if (!is.null(params$center_covariates)) params$center_covar
 
 tree <- ape::read.tree(tree_path)
 data <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
+# Normalise tip labels on both sides to underscore form — see comment in
+# phyloglm_uni.R for rationale (ape converts unquoted _ to space on read).
+tree$tip.label <- gsub(" ", "_", tree$tip.label, fixed = TRUE)
+data[[tip_column]] <- gsub(" ", "_", data[[tip_column]], fixed = TRUE)
 rownames(data) <- data[[tip_column]]
 
 kept <- intersect(tree$tip.label, data[[tip_column]])
