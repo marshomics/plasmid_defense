@@ -65,16 +65,76 @@ phyloglm_method <- switch(evol_model,
 
 tree <- ape::read.tree(tree_path)
 data <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
-# ape::read.tree() converts unquoted underscores in Newick labels to
-# spaces; the data TSV preserves whatever the upstream Python code wrote.
-# Force both sides to underscore form so intersect() works regardless of
-# how the tree file was serialised (dendropy unquoted_underscores=True,
-# ape's own write.tree, ETE, manual, etc.).
-tree$tip.label <- gsub(" ", "_", tree$tip.label, fixed = TRUE)
-data[[tip_column]] <- gsub(" ", "_", data[[tip_column]], fixed = TRUE)
+
+# ---- Pre-normalisation diagnostic (always printed) ----
+# Use cat(file=stderr()) rather than message() so this is visible in
+# every call chain (subprocess capture, RStudio, interactive). Dump the
+# raw shapes and a small sample BEFORE any normalisation so we can see
+# exactly what ape and read.delim are handing us.
+cat(file = stderr(),
+    sprintf("[phyloglm_uni.R] tree_path=%s data_path=%s tip_column=%s\n",
+            tree_path, data_path, tip_column),
+    sprintf("[phyloglm_uni.R] length(tree$tip.label)=%d nrow(data)=%d\n",
+            length(tree$tip.label), nrow(data)),
+    sprintf("[phyloglm_uni.R] data columns (first 8): %s\n",
+            paste(head(colnames(data), 8), collapse = " | ")),
+    sprintf("[phyloglm_uni.R] tree tips RAW (first 5): %s\n",
+            paste(head(tree$tip.label, 5), collapse = " | ")),
+    sprintf("[phyloglm_uni.R] data[[tip]] RAW (first 5): %s\n",
+            if (tip_column %in% colnames(data))
+              paste(head(data[[tip_column]], 5), collapse = " | ")
+            else "<MISSING COLUMN>")
+)
+
+# Normalise tip labels so the intersect is robust to two Newick quirks:
+#  (1) ape::read.tree() converts unquoted underscores to spaces; the
+#      data TSV preserves whatever Python wrote.
+#  (2) Some GTDB trees carry '[species NNN]'-style comments inside tip
+#      labels. ape inconsistently preserves bracketed substrings inside
+#      quoted labels depending on version; strip them on both sides so
+#      we don't silently drop the bracketed half on one side only.
+strip_annotations <- function(s) {
+  # Remove '[...]' spans plus any surrounding whitespace, trim any
+  # residual leading/trailing whitespace (covers the case where ape has
+  # already stripped the bracket as a Newick comment, leaving a trailing
+  # space), and collapse remaining interior whitespace to '_'.
+  s <- gsub("\\s*\\[[^]]*\\]\\s*", "", s)
+  s <- trimws(s)
+  gsub(" ", "_", s, fixed = TRUE)
+}
+tree$tip.label <- strip_annotations(tree$tip.label)
+if (tip_column %in% colnames(data)) {
+  data[[tip_column]] <- strip_annotations(data[[tip_column]])
+}
+
+cat(file = stderr(),
+    sprintf("[phyloglm_uni.R] tree tips NORMALISED (first 5): %s\n",
+            paste(head(tree$tip.label, 5), collapse = " | ")),
+    sprintf("[phyloglm_uni.R] data[[tip]] NORMALISED (first 5): %s\n",
+            if (tip_column %in% colnames(data))
+              paste(head(data[[tip_column]], 5), collapse = " | ")
+            else "<MISSING COLUMN>")
+)
+
 rownames(data) <- data[[tip_column]]
 kept <- intersect(tree$tip.label, data[[tip_column]])
-if (length(kept) < 10) stop("Too few matched tips (", length(kept), ")")
+cat(file = stderr(),
+    sprintf("[phyloglm_uni.R] intersect: %d tips matched\n", length(kept))
+)
+if (length(kept) < 10) {
+  # Show a few tree tips that DON'T appear in the data, so the mismatch
+  # pattern is obvious (underscore vs space, missing prefix, etc.).
+  tree_not_in_data <- setdiff(head(tree$tip.label, 20), data[[tip_column]])
+  data_not_in_tree <- setdiff(head(data[[tip_column]], 20),
+                               tree$tip.label)
+  cat(file = stderr(),
+      sprintf("[phyloglm_uni.R] tree tips NOT in data (first 5): %s\n",
+              paste(head(tree_not_in_data, 5), collapse = " | ")),
+      sprintf("[phyloglm_uni.R] data tips NOT in tree (first 5): %s\n",
+              paste(head(data_not_in_tree, 5), collapse = " | "))
+  )
+  stop("Too few matched tips (", length(kept), ")")
+}
 tree <- ape::drop.tip(tree, setdiff(tree$tip.label, kept))
 data <- data[tree$tip.label, , drop = FALSE]
 
