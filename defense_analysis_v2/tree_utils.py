@@ -21,9 +21,11 @@ import numpy as np
 import pandas as pd
 
 try:
+    import dendropy
     from dendropy import Tree
     DENDROPY_AVAILABLE = True
 except ImportError:
+    dendropy = None  # type: ignore[assignment]
     DENDROPY_AVAILABLE = False
 
 
@@ -49,103 +51,97 @@ def _extract_tip_labels(newick: str) -> List[str]:
 
 def dedupe_newick_file(tree_path: str, logger: logging.Logger,
                        out_path: Optional[Path] = None) -> Path:
-    """Return a path to a Newick file with unique tip labels.
+    """Return a path to a Newick file with unique leaf labels.
 
-    GTDB species labels can collide when the same SpeciesCluster is
-    represented by multiple MAGs (e.g. 's__UBA12225 sp002347925' appearing
-    on two tips). dendropy's default loader raises on duplicates. We rename
-    the 2nd, 3rd, ... occurrences of each duplicate to
-    '<label>__dup<N>' and write a sanitized Newick file.
+    Uses dendropy's Newick parser with ``suppress_internal_node_taxa=True``
+    and ``suppress_leaf_node_taxa=True`` so labels are stored on
+    ``node.label`` directly and duplicates don't collide in a shared
+    TaxonNamespace. This is a far more robust parser than regex over the
+    raw file — handles BEAST / NHX annotations, bootstrap values,
+    internal node labels, and multi-tree files correctly.
 
-    Downstream species-name matching (``match_species_to_tree``) only sees
-    the original labels for the first occurrence, so the duplicates are
-    effectively excluded from phylogenetic analyses. A warning is logged
-    listing every collision so the user can decide whether to regenerate
-    the tree.
-
-    Some Newick files contain multiple trees in the same file (rooted +
-    unrooted, bootstrap replicates, etc.), delimited by ';'. Downstream
-    phylogenetic models only use one tree, and scanning the whole file
-    would treat every tip as a duplicate of itself once per extra tree.
-    We truncate to the first ';' and log a warning in that case.
+    If duplicate leaf labels are detected, the 2nd, 3rd, ... occurrences
+    are renamed to ``<label>__dupN`` and a warning is logged. The rewrite
+    is written to ``out_path`` (or a tempfile) and the new path is
+    returned. Input with no duplicates is left untouched and the original
+    path is returned.
     """
-    src = Path(tree_path).read_text()
+    if not DENDROPY_AVAILABLE:
+        raise RuntimeError("dendropy is required for tree loading")
 
-    # Single-tree guard: Newick trees end with ';'. Multiple ';' means
-    # multiple trees — keep only the first. Track whether we truncated so
-    # we know to force a rewrite even if there are no duplicate labels.
-    stripped = src.rstrip()
-    trailing_semi = stripped.endswith(";")
-    n_trees = stripped.count(";")
-    truncated_to_first_tree = False
-    if n_trees > 1:
-        first_end = src.find(";")
-        logger.warning(
-            f"Tree file '{tree_path}' contains {n_trees} trees "
-            f"(';' delimiters); analysing only the first tree. "
-            f"Downstream phylogenetic models take a single tree."
+    # suppress_*_node_taxa=True moves labels to .label instead of into a
+    # shared TaxonNamespace where duplicates raise. Use TreeList.get so
+    # a file with multiple trees doesn't silently lose trees past the
+    # first (we still only analyse the first below, but with a warning).
+    try:
+        tree_list = dendropy.TreeList.get(  # type: ignore[attr-defined]
+            path=str(tree_path),
+            schema="newick",
+            preserve_underscores=True,
+            suppress_internal_node_taxa=True,
+            suppress_leaf_node_taxa=True,
         )
-        src = src[: first_end + 1]
-        truncated_to_first_tree = True
-    elif n_trees == 0 and not trailing_semi:
-        logger.warning(
-            f"Tree file '{tree_path}' has no ';' terminator — "
-            "proceeding but output may be malformed."
-        )
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to parse tree file '{tree_path}' with dendropy: {e}"
+        ) from e
 
-    labels = _extract_tip_labels(src)
-    counts = Counter(labels)
-    dups = {lab: n for lab, n in counts.items() if n > 1}
+    if len(tree_list) == 0:
+        raise RuntimeError(f"No trees found in {tree_path}")
+    if len(tree_list) > 1:
+        logger.warning(
+            f"Tree file '{tree_path}' contains {len(tree_list)} trees; "
+            "analysing only the first. Downstream phylogenetic models "
+            "take a single tree."
+        )
+    tree = tree_list[0]
+
+    # Collect leaf labels, detect duplicates, rename in-place.
+    from collections import Counter as _Counter
+    seen: _Counter = _Counter()
+    leaves = [n for n in tree.leaf_node_iter()]
+    for leaf in leaves:
+        seen[leaf.label] += 1
+    total_leaves = len(leaves)
+    unique_labels = len(seen)
+    dups = {lab: n for lab, n in seen.items() if n > 1 and lab is not None}
     logger.info(
-        f"Tree file scan: {len(labels)} tip-label occurrences, "
-        f"{len(counts)} unique, {len(dups)} duplicated."
+        f"Tree parse: {total_leaves} leaves, {unique_labels} unique labels, "
+        f"{len(dups)} duplicated."
     )
-    if not dups and not truncated_to_first_tree:
-        # Nothing to change; return original path so callers don't pay
-        # for an unnecessary rewrite.
+
+    multi_tree = len(tree_list) > 1
+    if not dups and not multi_tree:
         return Path(tree_path)
-    if not dups and truncated_to_first_tree:
-        # Must still write the truncated single-tree version so
-        # downstream loaders don't re-parse the whole multi-tree file.
-        out_path = out_path or Path(tempfile.mkstemp(
-            prefix="defense_v2_single_tree_", suffix=".nwk")[1])
-        out_path.write_text(src)
-        logger.info(f"Wrote single-tree version to {out_path}")
-        return out_path
 
-    logger.warning(
-        f"Tree has {len(dups)} duplicate tip label(s); renaming extras "
-        f"with '__dupN' suffix so dendropy can load the tree. Example: "
-        f"{next(iter(dups))} x{dups[next(iter(dups))]}"
-    )
-
-    # Walk the string left-to-right, assigning suffixes the second time we
-    # see a given label.
-    seen: Counter = Counter()
-    out_parts: List[str] = []
-    pos = 0
-    for m in _TIP_LABEL_RE.finditer(src):
-        lab = m.group(1)
-        start, end = m.span(1)
-        out_parts.append(src[pos:start])
-        seen[lab] += 1
-        if seen[lab] == 1 or counts[lab] == 1:
-            out_parts.append(lab)
-        else:
-            # Preserve quoting if the original was quoted
-            if lab.startswith("'") and lab.endswith("'"):
-                inner = lab[1:-1]
-                out_parts.append(f"'{inner}__dup{seen[lab] - 1}'")
-            else:
-                out_parts.append(f"{lab}__dup{seen[lab] - 1}")
-        pos = end
-    out_parts.append(src[pos:])
+    if dups:
+        example = next(iter(dups))
+        logger.warning(
+            f"Tree has {len(dups)} duplicate leaf label(s); renaming "
+            f"extras with '__dupN' suffix. Example: {example!r} "
+            f"x{dups[example]}"
+        )
+        counter: _Counter = _Counter()
+        for leaf in leaves:
+            lab = leaf.label
+            if lab is None:
+                continue
+            counter[lab] += 1
+            if counter[lab] > 1:
+                leaf.label = f"{lab}__dup{counter[lab] - 1}"
 
     out_path = out_path or Path(tempfile.mkstemp(
-        prefix="defense_v2_dedup_tree_", suffix=".nwk")[1])
-    out_path.write_text("".join(out_parts))
-    logger.info(f"Wrote deduplicated tree to {out_path}")
+        prefix="defense_v2_clean_tree_", suffix=".nwk")[1])
+    tree.write(
+        path=str(out_path),
+        schema="newick",
+        unquoted_underscores=True,
+        suppress_internal_node_labels=False,
+    )
+    logger.info(f"Wrote cleaned tree to {out_path}")
     return out_path
+
+
 
 
 def normalize_species_name(name: str) -> str:
@@ -232,31 +228,12 @@ def preprocess_newick_to_file(tree_path: str, kept_tips: List[str],
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # dendropy's writer auto-quotes labels that contain whitespace, which
+    # is what we need for ape::read.tree to preserve them verbatim.
+    # Labels of pure alphanumeric + underscore form are written unquoted;
+    # for those ape applies its underscore->space conversion, which the
+    # R scripts cancel out by doing a matching gsub on the `tip` column.
     tree.write(path=str(out_path), schema="newick", unquoted_underscores=True)
-
-    # ape::read.tree() applies a standard Newick convention of converting
-    # unquoted underscores to spaces. That breaks the `tip` column <->
-    # tree$tip.label intersect in every downstream R script unless the
-    # scripts themselves re-normalise. Belt-and-braces: force-quote every
-    # tip label in the written Newick so ape reads them verbatim and the
-    # pipeline works even when the R scripts aren't in sync with this
-    # module. A label already quoted is left alone.
-    try:
-        content = out_path.read_text()
-        wrapped = _TIP_LABEL_RE.sub(
-            lambda m: m.group(1) if m.group(1).startswith("'")
-                    else f"'{m.group(1)}'",
-            content,
-        )
-        if wrapped != content:
-            out_path.write_text(wrapped)
-    except Exception as e:
-        logger.warning(
-            f"Could not post-quote tip labels in {out_path}: {e}. "
-            "If ape reports 'Too few matched tips', re-sync the R scripts "
-            "under r_scripts/ which apply a space/underscore gsub fallback."
-        )
-
     return out_path
 
 
