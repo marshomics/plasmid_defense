@@ -35,6 +35,9 @@ data <- read.delim(data_path, sep = "\t", stringsAsFactors = FALSE, check.names 
 # labels are meaningful species identifiers here; do NOT strip them.
 normalise_tips <- function(s) {
   s <- trimws(s)
+  # Strip literal outer single quotes — see phyloglm_uni.R comment.
+  s <- gsub("^'+|'+$", "", s)
+  s <- trimws(s)
   gsub(" ", "_", s, fixed = TRUE)
 }
 tree$tip.label <- normalise_tips(tree$tip.label)
