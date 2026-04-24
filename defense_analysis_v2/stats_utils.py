@@ -145,11 +145,21 @@ def firth_logistic_regression(X: np.ndarray, y: np.ndarray,
         cov = np.linalg.inv(I)
     except np.linalg.LinAlgError:
         cov = np.linalg.pinv(I)
-    se = np.sqrt(np.diag(cov))
-    z = beta / se
+    # Ill-conditioned information matrices (rare predictors, near-separation
+    # the Jeffreys penalty couldn't fully rescue) can produce negative
+    # diagonal entries when inversion falls through to pinv. Clip those to
+    # NaN rather than letting np.sqrt emit a RuntimeWarning for every fit;
+    # the NaN propagates cleanly through z / p so the downstream FDR
+    # correction and the "converged" flag surface the failure explicitly.
+    diag = np.diag(cov).copy()
+    diag[~(np.isfinite(diag) & (diag >= 0))] = np.nan
+    with np.errstate(invalid="ignore"):
+        se = np.sqrt(diag)
+        z = beta / se
     # Two-sided z-test (Wald); profile-likelihood intervals would be tighter
     # but are a larger change to plumb through.
-    p_vals = 2 * stats.norm.sf(np.abs(z))
+    with np.errstate(invalid="ignore"):
+        p_vals = 2 * stats.norm.sf(np.abs(z))
 
     return {
         "coef": beta,
