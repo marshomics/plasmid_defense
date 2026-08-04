@@ -1,0 +1,14 @@
+# Python dependencies for defense_analysis_v2. Mirrors pyproject.toml so
+# users who prefer `pip install -r requirements.txt` over `pip install .`
+# get the same environment.
+#
+# Tested with Python 3.9 - 3.12. Version floors are the oldest where the
+# pipeline has been exercised; newer is fine.
+numpy>=1.23
+pandas>=1.5
+scipy>=1.10
+statsmodels>=0.14
+scikit-learn>=1.2
+joblib>=1.2
+dendropy>=4.6
+matplotlib>=3.6
