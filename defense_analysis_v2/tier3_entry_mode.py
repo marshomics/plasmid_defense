@@ -167,9 +167,9 @@ def build_entry_mode_features(entry_mode: pd.DataFrame,
                               logger: logging.Logger) -> pd.DataFrame:
     """Per-species conjugative / non-conjugative plasmid counts.
 
-    Columns: ``n_plasmids_entrymode``, ``n_plasmid_conjugative``,
-    ``n_plasmid_nonconjugative``, ``frac_plasmid_nonconjugative``,
-    ``any_plasmid_conjugative``, ``any_plasmid_nonconjugative``.
+    Columns are all `em_`-prefixed: ``em_n_plasmids``,
+    ``em_n_conjugative``, ``em_n_nonconjugative``, ``em_frac_nonconjugative``,
+    ``em_any_conjugative``, ``em_any_nonconjugative``.
     """
     em = entry_mode[entry_mode["gtdb_species"].isin(set(species_list))]
     logger.info(
@@ -178,24 +178,38 @@ def build_entry_mode_features(entry_mode: pd.DataFrame,
     if em.empty:
         return pd.DataFrame(columns=["gtdb_species"])
 
+    # ALL entry-mode columns carry an `em_` prefix.
+    #
+    # Without it they collide with the mob_suite-derived mobility
+    # stratification that io_utils.build_species_plasmid_features already
+    # creates: `n_plasmid_conjugative` and `any_plasmid_conjugative` exist in
+    # both. A pandas merge then renames BOTH sides to _x/_y, so
+    # `any_plasmid_conjugative` ceases to exist and the mobility stratum it
+    # names is silently dropped from every downstream stage. That is not a
+    # hypothetical -- it happened, and the only symptom was one quiet log line
+    # ("Tier 1 skipping outcome 'conjugative' — no binary column available")
+    # while five other outcomes went on fitting against a corrupted frame.
+    #
+    # These are also two DIFFERENT annotations of the same concept (mob_suite's
+    # predicted_mobility_updated vs the curated `conjugative` flag), so keeping
+    # them distinct is correct on the science as well as on the plumbing.
     g = em.groupby("gtdb_species")["conjugative"]
     feats = pd.DataFrame({
-        "n_plasmids_entrymode": g.size(),
-        "n_plasmid_conjugative": g.sum(),
+        "em_n_plasmids": g.size(),
+        "em_n_conjugative": g.sum(),
     })
-    feats["n_plasmid_nonconjugative"] = (feats["n_plasmids_entrymode"]
-                                         - feats["n_plasmid_conjugative"])
-    feats["frac_plasmid_nonconjugative"] = (
-        feats["n_plasmid_nonconjugative"] / feats["n_plasmids_entrymode"])
-    feats["any_plasmid_conjugative"] = (feats["n_plasmid_conjugative"] > 0).astype(int)
-    feats["any_plasmid_nonconjugative"] = (
-        feats["n_plasmid_nonconjugative"] > 0).astype(int)
+    feats["em_n_nonconjugative"] = (feats["em_n_plasmids"]
+                                    - feats["em_n_conjugative"])
+    feats["em_frac_nonconjugative"] = (
+        feats["em_n_nonconjugative"] / feats["em_n_plasmids"])
+    feats["em_any_conjugative"] = (feats["em_n_conjugative"] > 0).astype(int)
+    feats["em_any_nonconjugative"] = (feats["em_n_nonconjugative"] > 0).astype(int)
     feats = feats.reset_index()
 
     logger.info(
         f"Entry-mode features: {len(feats):,} species; median plasmids/species "
-        f"{feats['n_plasmids_entrymode'].median():.0f}; "
-        f"{int((feats['n_plasmids_entrymode'] >= config.entry_mode_min_plasmids_per_species).sum()):,} "
+        f"{feats['em_n_plasmids'].median():.0f}; "
+        f"{int((feats['em_n_plasmids'] >= config.entry_mode_min_plasmids_per_species).sum()):,} "
         f"species have >= {config.entry_mode_min_plasmids_per_species} plasmids "
         f"and can contribute to the composition model")
     return feats
@@ -242,8 +256,8 @@ def _fit_one_system_pglmm(phylo_data: pd.DataFrame, system: str,
             "covariates": covariates,
             "tip_column": "tip",
             "outcome_mode": "binomial",
-            "response_k_column": "n_plasmid_nonconjugative",
-            "response_n_column": "n_plasmids_entrymode",
+            "response_k_column": "em_n_nonconjugative",
+            "response_n_column": "em_n_plasmids",
             "interaction_pairs": [],
             "bayes": False,
             "reml": True,
@@ -321,8 +335,8 @@ def _fit_chunk(shared, systems: List[str], covariates: List[str],
             "predictors": list(systems),
             "covariates": list(covariates),
             "tip_column": "tip",
-            "response_k_column": "n_plasmid_nonconjugative",
-            "response_n_column": "n_plasmids_entrymode",
+            "response_k_column": "em_n_nonconjugative",
+            "response_n_column": "em_n_plasmids",
             "min_count": config.min_count_per_category,
             "reml": True,
             "per_fit_seconds": 900,
@@ -361,8 +375,8 @@ def _fit_one_system_pgls(phylo_data: pd.DataFrame, system: str,
     binomial likelihood, which is why ``entry_mode_engine`` defaults to pglmm.
     """
     d = phylo_data.copy()
-    k = d["n_plasmid_nonconjugative"].astype(float)
-    n = d["n_plasmids_entrymode"].astype(float)
+    k = d["em_n_nonconjugative"].astype(float)
+    n = d["em_n_plasmids"].astype(float)
     d["_emp_logit"] = np.log((k + 0.5) / (n - k + 0.5))
     pass_cols = ["tip", "_emp_logit", system] + [c for c in covariates
                                                  if c in d.columns]
@@ -408,14 +422,14 @@ def run_entry_mode_composition(phylo_data: pd.DataFrame,
     is the direction the ssDNA-evasion mechanism predicts for dsDNA-restricting
     systems.
     """
-    need = ["n_plasmid_nonconjugative", "n_plasmids_entrymode"]
+    need = ["em_n_nonconjugative", "em_n_plasmids"]
     missing = [c for c in need if c not in phylo_data.columns]
     if missing:
         logger.warning(f"Entry-mode composition skipped — missing {missing}")
         return pd.DataFrame()
 
     d = phylo_data[
-        phylo_data["n_plasmids_entrymode"].fillna(0)
+        phylo_data["em_n_plasmids"].fillna(0)
         >= config.entry_mode_min_plasmids_per_species].copy()
     if len(d) < 50:
         logger.warning(
@@ -432,7 +446,7 @@ def run_entry_mode_composition(phylo_data: pd.DataFrame,
         config.covariate_columns_for_mode(config.primary_covariate_mode,
                                           include_plasmid_count=False), d))
 
-    frac = float((d["n_plasmid_nonconjugative"] / d["n_plasmids_entrymode"]).mean())
+    frac = float((d["em_n_nonconjugative"] / d["em_n_plasmids"]).mean())
     logger.info(
         f"Entry-mode composition: {len(d):,} species, mean non-conjugative "
         f"fraction {frac:.1%}, engine={config.entry_mode_engine}")
@@ -618,8 +632,8 @@ def run_entry_mode_binary_secondary(phylo_data: pd.DataFrame,
     by construction.
     """
     pieces = []
-    for label, col in (("conjugative", "any_plasmid_conjugative"),
-                       ("nonconjugative", "any_plasmid_nonconjugative")):
+    for label, col in (("conjugative", "em_any_conjugative"),
+                       ("nonconjugative", "em_any_nonconjugative")):
         if col not in phylo_data.columns:
             continue
         covariates = list(config.resolve_covariates(

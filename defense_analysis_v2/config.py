@@ -763,6 +763,15 @@ class Config:
     # a safety valve. 0 means "use n_jobs".
     max_concurrent_r_calls: int = 0
 
+    # Smoke-testing. When set, the species table is randomly subsampled to
+    # this many species (stratified by phylum so the tree keeps its shape)
+    # immediately after aggregation. Exists so the R side can be exercised in
+    # minutes rather than hours: without it there is no way to run a genuine
+    # smoke test, and "run a few stages on the full data" is not a smoke test,
+    # it is a short real run. NEVER set this for a production run -- results
+    # from a subsample are not the analysis.
+    subsample_species: Optional[int] = None
+
     # ------------------------------------------------------------------
     # Compute
     # ------------------------------------------------------------------

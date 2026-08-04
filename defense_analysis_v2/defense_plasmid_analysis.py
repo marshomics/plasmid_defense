@@ -292,6 +292,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rscript", default="Rscript",
                    help="R executable (default: Rscript on PATH)")
     p.add_argument(
+        "--subsample", type=int, default=None, metavar="N",
+        help=("SMOKE TEST ONLY. Randomly subsample to N species (stratified "
+              "by phylum) after aggregation, so the R side can be exercised "
+              "in minutes. Results from a subsample are NOT the analysis and "
+              "the run is tagged SUBSAMPLE in the log."))
+    p.add_argument(
         "--estimate-cost", action="store_true",
         help=("Print a per-stage projection of R calls, model fits, "
               "wall-clock and memory for the configured stages, then exit "
@@ -388,9 +394,49 @@ def run_pipeline(input_path: str, cfg: config.Config,
     prevalence_df, binary_df = io_utils.add_defense_burden(
         prevalence_df, binary_df, defense_cols)
 
+    # ---- smoke-test subsampling ----
+    if cfg.subsample_species and cfg.subsample_species < len(prevalence_df):
+        import numpy as _np
+        rng = _np.random.default_rng(cfg.random_seed)
+        n_target = int(cfg.subsample_species)
+        rank = "gtdb_phylum" if "gtdb_phylum" in prevalence_df.columns else None
+        if rank:
+            # Proportional draw within each phylum, minimum 1, so the pruned
+            # tree keeps a realistic shape rather than collapsing to one clade.
+            frac = n_target / len(prevalence_df)
+            keep = []
+            for _, grp in prevalence_df.groupby(rank):
+                k = max(1, int(round(len(grp) * frac)))
+                keep.extend(grp.sample(min(k, len(grp)),
+                                       random_state=int(cfg.random_seed)).index)
+            idx = prevalence_df.loc[keep, "gtdb_species"]
+        else:
+            idx = prevalence_df.sample(n_target,
+                                       random_state=int(cfg.random_seed))["gtdb_species"]
+        keep_sp = set(idx)
+        prevalence_df = prevalence_df[prevalence_df["gtdb_species"].isin(keep_sp)]
+        binary_df = binary_df[binary_df["gtdb_species"].isin(keep_sp)]
+        # The depth spline knots are quantiles of the rows being fit, so they
+        # must be rebuilt on the subsample.
+        prevalence_df = io_utils.add_depth_basis(prevalence_df, cfg, logger)
+        binary_df = io_utils.add_depth_basis(binary_df, cfg, logger)
+        logger.warning(
+            f"*** SUBSAMPLE MODE: {len(prevalence_df):,} species "
+            f"({100 * binary_df['has_plasmid_binary'].mean():.1f}% "
+            f"plasmid-positive). This is a SMOKE TEST. Results are NOT the "
+            f"analysis and must not be reported. ***")
+
     # ---- A4: entry-mode (conjugative / non-conjugative) plasmid features ----
     # Merged here so build_phylo_dataframe carries them through to R along
     # with every other species-level column.
+    #
+    # Built on COPIES and only committed once the whole block succeeds. The
+    # previous version merged in place and then raised in the fillna loop; the
+    # except clause logged and continued, but the merges had already happened,
+    # so the pipeline carried on with a frame whose colliding columns had been
+    # renamed to _x/_y. `any_plasmid_conjugative` ceased to exist and the
+    # conjugative mobility stratum was silently dropped from every downstream
+    # stage. A partial failure must not leave a half-modified frame behind.
     if "entry_mode" in (cfg.stages or DEFAULT_STAGES):
         try:
             em_table = tier3_entry_mode.load_entry_mode_table(
@@ -399,22 +445,29 @@ def run_pipeline(input_path: str, cfg: config.Config,
                 em_table, prevalence_df["gtdb_species"].tolist(), cfg, logger)
             if not em_feats.empty:
                 em_cols = [c for c in em_feats.columns if c != "gtdb_species"]
-                prevalence_df = prevalence_df.merge(em_feats, on="gtdb_species",
-                                                    how="left")
-                binary_df = binary_df.merge(em_feats, on="gtdb_species",
-                                            how="left")
-                # Species with no plasmids at all are structural zeros, not
-                # missing: they contribute to the binary secondary analysis but
-                # are excluded from the composition model by the
-                # min-plasmids-per-species gate.
-                for dfref in (prevalence_df, binary_df):
+                # Fail loudly rather than let pandas silently rename on merge.
+                clash = sorted(set(em_cols) & set(prevalence_df.columns))
+                if clash:
+                    raise ValueError(
+                        f"entry-mode feature names collide with existing "
+                        f"columns: {clash}. All entry-mode columns must carry "
+                        f"the 'em_' prefix.")
+                prev_new = prevalence_df.merge(em_feats, on="gtdb_species",
+                                               how="left")
+                bin_new = binary_df.merge(em_feats, on="gtdb_species",
+                                          how="left")
+                # Species with no plasmids are structural zeros, not missing.
+                for dfref in (prev_new, bin_new):
                     for c in em_cols:
                         dfref[c] = dfref[c].fillna(0)
+                # Commit only now.
+                prevalence_df, binary_df = prev_new, bin_new
                 logger.info(f"Entry-mode features merged: {em_cols}")
         except Exception as exc:
             logger.error(
-                f"Entry-mode feature construction failed: {exc}. "
-                f"The entry_mode stage will be skipped.")
+                f"Entry-mode feature construction failed: {exc!r}. "
+                f"The entry_mode stage will be skipped; the rest of the "
+                f"pipeline continues on the UNMODIFIED frame.")
 
     # Tree setup
     workdir = Path(tempfile.mkdtemp(prefix=f"defense_v2_{granularity_label}_"))
@@ -829,6 +882,9 @@ def main(argv=None):
 
     cfg = config.Config()
     cfg = apply_cli_to_config(cfg, ns)
+
+    if getattr(ns, "subsample", None):
+        cfg = replace(cfg, subsample_species=int(ns.subsample))
 
     if getattr(ns, "estimate_cost", False):
         from .cost_model import estimate_pipeline_cost, format_cost_report

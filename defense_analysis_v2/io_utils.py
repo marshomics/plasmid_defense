@@ -143,8 +143,27 @@ def restricted_cubic_spline_basis(x: np.ndarray, df: int
     if df == 1 or n_knots < 3 or n_unique < n_knots + 2:
         return x.reshape(-1, 1), []
 
+    # Knot placement for a HEAVILY TIED variable.
+    #
+    # n_strains is an integer and most species have very few: on the real data
+    # the 5/27.5/50/72.5/95% quantiles of log1p(n_strains) collapse to just
+    # three distinct values, so a df=5 request silently produced a 2-column
+    # basis. Quantile knots are the right default -- they put resolution where
+    # the data is -- but when ties collapse them, top up from the distinct
+    # observed values so the requested resolution is actually delivered across
+    # the range that matters (the heavy tail, where the depth confound lives).
     qs = np.linspace(0.05, 0.95, n_knots)
     knots = list(np.unique(np.quantile(finite, qs)))
+    if len(knots) < n_knots:
+        uniq = np.unique(finite)
+        if uniq.size >= n_knots:
+            # Evenly spaced over the distinct values, which for a right-skewed
+            # count reaches into the tail instead of piling up at the mode.
+            idx = np.linspace(0, uniq.size - 1, n_knots).round().astype(int)
+            topped = np.unique(np.concatenate([knots, uniq[idx]]))
+            if topped.size > len(knots):
+                knots = list(topped[:n_knots] if topped.size > n_knots
+                             else topped)
     if len(knots) < 3:
         return x.reshape(-1, 1), []
 
